@@ -27,6 +27,7 @@ var ReactInstanceMap = require('ReactInstanceMap');
 var {
   AnimationPriority,
 } = require('ReactPriorityLevel');
+var emptyObject = require('emptyObject');
 
 var scheduledAnimationCallback = null;
 var scheduledDeferredCallback = null;
@@ -39,6 +40,14 @@ type TextInstance = {| text: string, id: number |};
 var instanceCounter = 0;
 
 var NoopRenderer = ReactFiberReconciler({
+
+  getRootHostContext() {
+    return emptyObject;
+  },
+
+  getChildHostContext() {
+    return emptyObject;
+  },
 
   createInstance(type : string, props : Props) : Instance {
     const inst = {
@@ -60,11 +69,11 @@ var NoopRenderer = ReactFiberReconciler({
     // Noop
   },
 
-  prepareUpdate(instance : Instance, oldProps : Props, newProps : Props) : boolean {
+  prepareUpdate(instance : Instance, type : string, oldProps : Props, newProps : Props) : boolean {
     return true;
   },
 
-  commitUpdate(instance : Instance, oldProps : Props, newProps : Props) : void {
+  commitUpdate(instance : Instance, type : string, oldProps : Props, newProps : Props) : void {
     instance.prop = newProps.prop;
   },
 
@@ -77,7 +86,12 @@ var NoopRenderer = ReactFiberReconciler({
 
   resetTextContent(instance : Instance) : void {},
 
-  createTextInstance(text : string) : TextInstance {
+  createTextInstance(
+    text : string,
+    rootContainerInstance : Container,
+    hostContext : Object,
+    internalInstanceHandle : Object
+  ) : TextInstance {
     var inst = { text : text, id: instanceCounter++ };
     // Hide from unit tests
     Object.defineProperty(inst, 'id', { value: inst.id, enumerable: false });
@@ -280,17 +294,20 @@ var ReactNoop = {
 
     function logUpdateQueue(updateQueue : UpdateQueue, depth) {
       log(
-        '  '.repeat(depth + 1) + 'QUEUED UPDATES',
-        updateQueue.isReplace ? 'is replace' : '',
-        updateQueue.isForced ? 'is forced' : ''
+        '  '.repeat(depth + 1) + 'QUEUED UPDATES'
       );
+      const firstUpdate = updateQueue.first;
+      if (!firstUpdate) {
+        return;
+      }
+
       log(
         '  '.repeat(depth + 1) + '~',
-        updateQueue.partialState,
-        updateQueue.callback ? 'with callback' : ''
+        firstUpdate && firstUpdate.partialState,
+        firstUpdate.callback ? 'with callback' : ''
       );
       var next;
-      while (next = updateQueue.next) {
+      while (next = firstUpdate.next) {
         log(
           '  '.repeat(depth + 1) + '~',
           next.partialState,

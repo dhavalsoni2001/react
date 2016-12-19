@@ -33,10 +33,16 @@ var warning = require('warning');
 
 var {
   createElement,
+  getChildNamespace,
   setInitialProperties,
   updateProperties,
 } = ReactDOMFiberComponent;
 var { precacheFiberNode } = ReactDOMComponentTree;
+
+if (__DEV__) {
+  var validateDOMNesting = require('validateDOMNesting');
+  var { updatedAncestorInfo } = validateDOMNesting;
+}
 
 const DOCUMENT_NODE = 9;
 
@@ -51,14 +57,46 @@ findDOMNode._injectFiber(function(fiber: Fiber) {
 type DOMContainerElement = Element & { _reactRootContainer: ?Object };
 
 type Container = Element;
-type Props = { className ?: string };
+type Props = { children ?: mixed };
 type Instance = Element;
 type TextInstance = Text;
+
+type HostContextDev = {
+  namespace : string,
+  ancestorInfo : mixed,
+};
+type HostContextProd = string;
+type HostContext = HostContextDev | HostContextProd;
 
 let eventsEnabled : ?boolean = null;
 let selectionInformation : ?mixed = null;
 
 var DOMRenderer = ReactFiberReconciler({
+
+  getRootHostContext(rootContainerInstance : Container) : HostContext {
+    const type = rootContainerInstance.tagName.toLowerCase();
+    if (__DEV__) {
+      const namespace = getChildNamespace(null, type);
+      const isMountingIntoDocument = rootContainerInstance.ownerDocument.documentElement === rootContainerInstance;
+      const ancestorInfo = updatedAncestorInfo(null, isMountingIntoDocument ? '#document' : type, null);
+      return {namespace, ancestorInfo};
+    }
+    return getChildNamespace(null, type);
+  },
+
+  getChildHostContext(
+    parentHostContext : HostContext,
+    type : string,
+  ) : HostContext {
+    if (__DEV__) {
+      const parentHostContextDev = ((parentHostContext : any) : HostContextDev);
+      const namespace = getChildNamespace(parentHostContextDev.namespace, type);
+      const ancestorInfo = updatedAncestorInfo(parentHostContextDev.ancestorInfo, type, null);
+      return {namespace, ancestorInfo};
+    }
+    const parentNamespace = ((parentHostContext : any) : HostContextProd);
+    return getChildNamespace(parentNamespace, type);
+  },
 
   prepareForCommit() : void {
     eventsEnabled = ReactBrowserEventEmitter.isEnabled();
@@ -76,11 +114,27 @@ var DOMRenderer = ReactFiberReconciler({
   createInstance(
     type : string,
     props : Props,
-    internalInstanceHandle : Object
+    rootContainerInstance : Container,
+    hostContext : HostContext,
+    internalInstanceHandle : Object,
   ) : Instance {
-    const root = document.documentElement; // HACK
-
-    const domElement : Instance = createElement(type, props, root);
+    let parentNamespace : string;
+    if (__DEV__) {
+      // TODO: take namespace into account when validating.
+      const hostContextDev = ((hostContext : any) : HostContextDev);
+      validateDOMNesting(type, null, null, hostContextDev.ancestorInfo);
+      if (
+        typeof props.children === 'string' ||
+        typeof props.children === 'number'
+      ) {
+        const ownAncestorInfo = updatedAncestorInfo(hostContextDev.ancestorInfo, type, null);
+        validateDOMNesting(null, String(props.children), null, ownAncestorInfo);
+      }
+      parentNamespace = hostContextDev.namespace;
+    } else {
+      parentNamespace = ((hostContext : any) : HostContextProd);
+    }
+    const domElement : Instance = createElement(type, props, rootContainerInstance, parentNamespace);
     precacheFiberNode(internalInstanceHandle, domElement);
     return domElement;
   },
@@ -89,32 +143,47 @@ var DOMRenderer = ReactFiberReconciler({
     parentInstance.appendChild(child);
   },
 
-  finalizeInitialChildren(domElement : Instance, type : string, props : Props) : void {
-    const root = document.documentElement; // HACK
-
-    setInitialProperties(domElement, type, props, root);
+  finalizeInitialChildren(
+    domElement : Instance,
+    type : string,
+    props : Props,
+    rootContainerInstance : Container,
+  ) : void {
+    setInitialProperties(domElement, type, props, rootContainerInstance);
   },
 
   prepareUpdate(
     domElement : Instance,
+    type : string,
     oldProps : Props,
-    newProps : Props
+    newProps : Props,
+    hostContext : HostContext,
   ) : boolean {
+    if (__DEV__) {
+      const hostContextDev = ((hostContext : any) : HostContextDev);
+      if (typeof newProps.children !== typeof oldProps.children && (
+        typeof newProps.children === 'string' ||
+        typeof newProps.children === 'number'
+      )) {
+        const ownAncestorInfo = updatedAncestorInfo(hostContextDev.ancestorInfo, type, null);
+        validateDOMNesting(null, String(newProps.children), null, ownAncestorInfo);
+      }
+    }
     return true;
   },
 
   commitUpdate(
     domElement : Instance,
+    type : string,
     oldProps : Props,
     newProps : Props,
-    internalInstanceHandle : Object
+    rootContainerInstance : Container,
+    internalInstanceHandle : Object,
   ) : void {
-    var type = domElement.tagName.toLowerCase(); // HACK
-    var root = document.documentElement; // HACK
     // Update the internal instance handle so that we know which props are
     // the current ones.
     precacheFiberNode(internalInstanceHandle, domElement);
-    updateProperties(domElement, type, oldProps, newProps, root);
+    updateProperties(domElement, type, oldProps, newProps, rootContainerInstance);
   },
 
   shouldSetTextContent(props : Props) : boolean {
@@ -133,7 +202,16 @@ var DOMRenderer = ReactFiberReconciler({
     domElement.textContent = '';
   },
 
-  createTextInstance(text : string, internalInstanceHandle : Object) : TextInstance {
+  createTextInstance(
+    text : string,
+    rootContainerInstance : Container,
+    hostContext : HostContext,
+    internalInstanceHandle : Object
+  ) : TextInstance {
+    if (__DEV__) {
+      const hostContextDev = ((hostContext : any) : HostContextDev);
+      validateDOMNesting(null, text, null, hostContextDev.ancestorInfo);
+    }
     var textNode : TextInstance = document.createTextNode(text);
     precacheFiberNode(internalInstanceHandle, textNode);
     return textNode;
@@ -231,6 +309,8 @@ var ReactDOM = {
   },
 
   unstable_batchedUpdates: ReactGenericBatching.batchedUpdates,
+
+  unstable_deferredUpdates: DOMRenderer.deferredUpdates,
 
 };
 

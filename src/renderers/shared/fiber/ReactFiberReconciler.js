@@ -24,8 +24,6 @@ var {
 var { createFiberRoot } = require('ReactFiberRoot');
 var ReactFiberScheduler = require('ReactFiberScheduler');
 
-var { createUpdateQueue, addCallbackToQueue } = require('ReactFiberUpdateQueue');
-
 if (__DEV__) {
   var ReactFiberInstrumentation = require('ReactFiberInstrumentation');
 }
@@ -40,19 +38,22 @@ export type Deadline = {
 
 type OpaqueNode = Fiber;
 
-export type HostConfig<T, P, I, TI, C> = {
+export type HostConfig<T, P, I, TI, C, CX> = {
 
-  createInstance(type : T, props : P, internalInstanceHandle : OpaqueNode) : I,
-  appendInitialChild(parentInstance : I, child : I) : void,
-  finalizeInitialChildren(parentInstance : I, type : T, props : P) : void,
+  getRootHostContext(rootContainerInstance : C) : CX,
+  getChildHostContext(parentHostContext : CX, type : T) : CX,
 
-  prepareUpdate(instance : I, oldProps : P, newProps : P) : boolean,
-  commitUpdate(instance : I, oldProps : P, newProps : P, internalInstanceHandle : OpaqueNode) : void,
+  createInstance(type : T, props : P, rootContainerInstance : C, hostContext : CX, internalInstanceHandle : OpaqueNode) : I,
+  appendInitialChild(parentInstance : I, child : I | TI) : void,
+  finalizeInitialChildren(parentInstance : I, type : T, props : P, rootContainerInstance : C) : void,
+
+  prepareUpdate(instance : I, type : T, oldProps : P, newProps : P, hostContext : CX) : boolean,
+  commitUpdate(instance : I, type : T, oldProps : P, newProps : P, rootContainerInstance : C, internalInstanceHandle : OpaqueNode) : void,
 
   shouldSetTextContent(props : P) : boolean,
   resetTextContent(instance : I) : void,
 
-  createTextInstance(text : string, internalInstanceHandle : OpaqueNode) : TI,
+  createTextInstance(text : string, rootContainerInstance : C, hostContext : CX, internalInstanceHandle : OpaqueNode) : TI,
   commitTextUpdate(textInstance : TI, oldText : string, newText : string) : void,
 
   appendChild(parentInstance : I | C, child : I | TI) : void,
@@ -77,6 +78,7 @@ export type Reconciler<C, I, TI> = {
   // FIXME: ESLint complains about type parameter
   batchedUpdates<A>(fn : () => A) : A,
   syncUpdates<A>(fn : () => A) : A,
+  deferredUpdates<A>(fn : () => A) : A,
   /* eslint-enable no-undef */
 
   // Used to extract the return value from the initial render. Legacy API.
@@ -89,17 +91,19 @@ export type Reconciler<C, I, TI> = {
 getContextForSubtree._injectFiber(function(fiber : Fiber) {
   const parentContext = findCurrentUnmaskedContext(fiber);
   return isContextProvider(fiber) ?
-    processChildContext(fiber, parentContext) :
+    processChildContext(fiber, parentContext, false) :
     parentContext;
 });
 
-module.exports = function<T, P, I, TI, C>(config : HostConfig<T, P, I, TI, C>) : Reconciler<C, I, TI> {
+module.exports = function<T, P, I, TI, C, CX>(config : HostConfig<T, P, I, TI, C, CX>) : Reconciler<C, I, TI> {
 
   var {
     scheduleWork,
+    scheduleUpdateCallback,
     performWithPriority,
     batchedUpdates,
     syncUpdates,
+    deferredUpdates,
   } = ReactFiberScheduler(config);
 
   return {
@@ -107,16 +111,19 @@ module.exports = function<T, P, I, TI, C>(config : HostConfig<T, P, I, TI, C>) :
     mountContainer(element : ReactElement<any>, containerInfo : C, parentComponent : ?ReactComponent<any, any, any>, callback: ?Function) : OpaqueNode {
       const context = getContextForSubtree(parentComponent);
       const root = createFiberRoot(containerInfo, context);
-      const container = root.current;
-      if (callback) {
-        const queue = createUpdateQueue(null);
-        addCallbackToQueue(queue, callback);
-        root.callbackList = queue;
-      }
-      // TODO: Use pending work/state instead of props.
+      const current = root.current;
+
+      // TODO: Use the updateQueue and scheduleUpdate, instead of pendingProps.
       // TODO: This should not override the pendingWorkPriority if there is
       // higher priority work in the subtree.
-      container.pendingProps = element;
+
+      current.pendingProps = element;
+      if (current.alternate) {
+        current.alternate.pendingProps = element;
+      }
+      if (callback) {
+        scheduleUpdateCallback(current, callback);
+      }
 
       scheduleWork(root);
 
@@ -127,22 +134,26 @@ module.exports = function<T, P, I, TI, C>(config : HostConfig<T, P, I, TI, C>) :
       // It may seem strange that we don't return the root here, but that will
       // allow us to have containers that are in the middle of the tree instead
       // of being roots.
-      return container;
+      return current;
     },
 
     updateContainer(element : ReactElement<any>, container : OpaqueNode, parentComponent : ?ReactComponent<any, any, any>, callback: ?Function) : void {
       // TODO: If this is a nested container, this won't be the root.
       const root : FiberRoot = (container.stateNode : any);
-      if (callback) {
-        const queue = root.callbackList ?
-          root.callbackList :
-          createUpdateQueue(null);
-        addCallbackToQueue(queue, callback);
-        root.callbackList = queue;
-      }
+      const current = root.current;
+
       root.pendingContext = getContextForSubtree(parentComponent);
-      // TODO: Use pending work/state instead of props.
-      root.current.pendingProps = element;
+
+      // TODO: Use the updateQueue and scheduleUpdate, instead of pendingProps.
+      // TODO: This should not override the pendingWorkPriority if there is
+      // higher priority work in the subtree.
+      current.pendingProps = element;
+      if (current.alternate) {
+        current.alternate.pendingProps = element;
+      }
+      if (callback) {
+        scheduleUpdateCallback(current, callback);
+      }
 
       scheduleWork(root);
 
@@ -156,6 +167,9 @@ module.exports = function<T, P, I, TI, C>(config : HostConfig<T, P, I, TI, C>) :
       const root : FiberRoot = (container.stateNode : any);
       // TODO: Use pending work/state instead of props.
       root.current.pendingProps = [];
+      if (root.current.alternate) {
+        root.current.alternate.pendingProps = [];
+      }
 
       scheduleWork(root);
 
@@ -169,6 +183,8 @@ module.exports = function<T, P, I, TI, C>(config : HostConfig<T, P, I, TI, C>) :
     batchedUpdates,
 
     syncUpdates,
+
+    deferredUpdates,
 
     getPublicRootInstance(container : OpaqueNode) : (ReactComponent<any, any, any> | I | TI | null) {
       const root : FiberRoot = (container.stateNode : any);
